@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const RawItem = require('../models/RawItem');
+const multer = require('multer');
+const fs = require('fs');
+const csv = require('csv-parser');
+
+const upload = multer({ dest: 'uploads/' });
+
 
 // @route   GET /api/raw-items
 // @desc    Get all raw items
@@ -47,4 +53,68 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// @route   POST /api/raw-items/upload-order-guide
+// @desc    Upload Order Guide CSV and upsert raw items
+router.post('/upload-order-guide', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Please upload a CSV file' });
+  }
+
+  const uniqueItems = {};
+
+  fs.createReadStream(req.file.path)
+    .pipe(csv())
+    .on('data', (row) => {
+      const keys = Object.keys(row);
+      const descKey = keys.find(k => k.trim() === 'Description') || 'Description';
+      const unitKey = keys.find(k => k.trim() === 'Unit Measure') || 'Unit Measure';
+
+      const name = (row[descKey] || '').trim();
+      const unit = (row[unitKey] || '').trim();
+
+      if (name) {
+        uniqueItems[name] = unit || 'pcs';
+      }
+    })
+    .on('end', async () => {
+      try {
+        fs.unlinkSync(req.file.path);
+
+        const names = Object.keys(uniqueItems);
+        if (names.length === 0) {
+          return res.status(400).json({ error: 'No valid ingredients found in the CSV file' });
+        }
+
+        const bulkOps = names.map(name => ({
+          updateOne: {
+            filter: { name },
+            update: {
+              $set: { unit: uniqueItems[name] }
+            },
+            upsert: true
+          }
+        }));
+
+        const result = await RawItem.bulkWrite(bulkOps);
+
+        res.json({
+          success: true,
+          totalProcessed: names.length,
+          upsertedCount: result.upsertedCount,
+          modifiedCount: result.modifiedCount,
+          matchedCount: result.matchedCount
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    })
+    .on('error', (err) => {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      res.status(500).json({ error: `Failed to parse CSV: ${err.message}` });
+    });
+});
+
 module.exports = router;
+
