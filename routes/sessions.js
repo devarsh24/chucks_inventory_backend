@@ -269,6 +269,82 @@ router.post('/submit-counts', async (req, res) => {
   }
 });
 
+// @route   POST /api/sessions/upload-initial-count
+// @desc    Parse a CSV of initial counts (Description/Name, Quantity) and return pre-filled map
+router.post('/upload-initial-count', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Please upload a CSV file' });
+  }
+
+  try {
+    const allRawItems = await RawItem.find();
+    const countsMap = {}; // { rawItemId: quantity }
+    const unmatched = [];
+    const rows = [];
+
+    fs.createReadStream(req.file.path)
+      .pipe(csv())
+      .on('data', (row) => {
+        rows.push(row);
+      })
+      .on('end', () => {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (e) {}
+
+        rows.forEach(row => {
+          const keys = Object.keys(row);
+          // Accept variations of Description, Item Name, Ingredient
+          const nameKey = keys.find(k =>
+            ['description', 'item', 'name', 'ingredient', 'rawitem', 'item_name'].includes(k.trim().toLowerCase())
+          );
+          // Accept variations of Quantity, Count, Qty, Initial Count, Amount
+          const qtyKey = keys.find(k =>
+            ['quantity', 'qty', 'count', 'amount', 'initial', 'initial count', 'initial_count'].includes(k.trim().toLowerCase())
+          );
+
+          if (!nameKey) return;
+
+          const name = (row[nameKey] || '').trim();
+          const qty = parseFloat(row[qtyKey] || '0') || 0;
+
+          if (!name) return;
+
+          // Match to raw item (case-insensitive)
+          const match = allRawItems.find(
+            item => item.name.toLowerCase() === name.toLowerCase()
+          );
+
+          if (match) {
+            countsMap[match._id.toString()] = qty;
+          } else {
+            unmatched.push(name);
+          }
+        });
+
+        res.json({
+          success: true,
+          countsMap,
+          matchedCount: Object.keys(countsMap).length,
+          unmatchedCount: unmatched.length,
+          unmatched: unmatched.slice(0, 20) // return first 20 unmatched for UI display
+        });
+      })
+      .on('error', (err) => {
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        res.status(500).json({ error: `Failed to parse CSV: ${err.message}` });
+      });
+
+  } catch (err) {
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // @route   DELETE /api/sessions/:id
 // @desc    Cancel/delete a session
 router.delete('/:id', async (req, res) => {
